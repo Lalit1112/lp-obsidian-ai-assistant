@@ -1,0 +1,9 @@
+{
+	"id": "lp-obsidian-ai-assistant",
+	"name": "LP Obsidian AI Assistant",
+	"version": "1.6.2",
+	"minAppVersion": "0.15.0",
+	"description": "Multi-provider AI assistant for Obsidian",
+	"author": "Lalit Pamnani",
+	"isDesktopOnly": false
+}
