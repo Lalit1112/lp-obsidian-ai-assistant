@@ -95,6 +95,7 @@ const DEFAULT_SETTINGS: AiAssistantSettings = {
 export default class AiAssistantPlugin extends Plugin {
   settings: AiAssistantSettings;
   providerClient: ProviderClient;
+  private readonly critiqueTimerIds = new Set<ReturnType<typeof setTimeout>>();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -188,7 +189,12 @@ export default class AiAssistantPlugin extends Plugin {
     this.addSettingTab(new AiAssistantSettingTab(this.app, this));
   }
 
-  onunload(): void {}
+  onunload(): void {
+    for (const timerId of this.critiqueTimerIds) {
+      clearTimeout(timerId);
+    }
+    this.critiqueTimerIds.clear();
+  }
 
   buildClient(): void {
     this.providerClient = new ProviderClient(
@@ -348,24 +354,31 @@ export default class AiAssistantPlugin extends Plugin {
     selectedText: string,
     input: PromptModalSubmit,
   ): Promise<void> {
-    const primaryModel = this.getModelOrDefault(
-      input.selectedModelKey,
-      DEFAULT_TEXT_MODEL_KEY,
-      "text",
-    );
-    const primaryAssistant = this.providerClient.createTextAssistant(
-      primaryModel,
-      maxTokensForResponseLength(input.responseLength),
-      input.useWebSearch,
-    );
-    const answer = await primaryAssistant.text_api_call([
-      {
-        role: "user",
-        content: buildPromptContent(input.promptText, selectedText),
-      },
-    ]);
+    let answer: string | undefined;
+    try {
+      const primaryModel = this.getModelOrDefault(
+        input.selectedModelKey,
+        DEFAULT_TEXT_MODEL_KEY,
+        "text",
+      );
+      const primaryAssistant = this.providerClient.createTextAssistant(
+        primaryModel,
+        maxTokensForResponseLength(input.responseLength),
+        input.useWebSearch,
+      );
+      answer = await primaryAssistant.text_api_call([
+        {
+          role: "user",
+          content: buildPromptContent(input.promptText, selectedText),
+        },
+      ]);
+    } catch (error) {
+      new Notice(`Error generating response: ${errorMessage(error)}`);
+      return;
+    }
 
     if (!answer) {
+      new Notice("Model returned an empty response.");
       return;
     }
 
@@ -374,10 +387,13 @@ export default class AiAssistantPlugin extends Plugin {
       return;
     }
 
-    new Notice("Preparing critique... This will take about 60 seconds.");
-    setTimeout(() => {
-      void this.insertCritique(editor, selectedText, input, answer);
-    }, 60000);
+    const critiqueInsertPos = editor.getCursor("to");
+    new Notice("Preparing critique...");
+    const timerId = setTimeout(() => {
+      this.critiqueTimerIds.delete(timerId);
+      void this.insertCritique(editor, selectedText, input, answer!, critiqueInsertPos);
+    }, 7000);
+    this.critiqueTimerIds.add(timerId);
   }
 
   private async insertCritique(
@@ -385,6 +401,7 @@ export default class AiAssistantPlugin extends Plugin {
     selectedText: string,
     input: PromptModalSubmit,
     answer: string,
+    insertPos: { line: number; ch: number },
   ): Promise<void> {
     try {
       const critiqueModel = this.getModelOrDefault(
@@ -397,6 +414,10 @@ export default class AiAssistantPlugin extends Plugin {
         maxTokensForResponseLength(input.responseLength),
       );
       const critique = await critiqueAssistant.text_api_call([
+        {
+          role: "system",
+          content: "You are a rigorous critique assistant. Evaluate AI-generated responses for accuracy, completeness, clarity, and usefulness. Be precise, direct, and constructive. Format your critique as bullet points.",
+        },
         {
           role: "user",
           content: `Critique this response. Be precise and direct. Use bullets.
@@ -414,9 +435,10 @@ Cover accuracy issues, missing elements, clarity problems, and specific improvem
         },
       ]);
       if (critique) {
-        const cursor = editor.getCursor("to");
-        editor.replaceRange(`\n\n---\n**Critique:**\n${critique.trim()}`, cursor);
+        editor.replaceRange(`\n\n---\n**Critique:**\n${critique.trim()}`, insertPos);
         new Notice("Critique completed.");
+      } else {
+        new Notice("Critique model returned an empty response.");
       }
     } catch (error) {
       new Notice(`Error generating critique: ${errorMessage(error)}`);

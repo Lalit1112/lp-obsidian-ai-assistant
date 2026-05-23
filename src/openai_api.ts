@@ -536,8 +536,18 @@ export class ProviderClient {
       model: model.id,
       status: response.status,
       usage: json.usage,
+      rawContentLength: content?.length,
     });
-    return stripReasoningTags(content);
+    const stripped = stripReasoningTags(content);
+    if (content && !stripped) {
+      this.log("request:warning", {
+        provider: model.provider,
+        model: model.id,
+        message: "Response was entirely reasoning tags — stripped to empty",
+        rawContentLength: content.length,
+      });
+    }
+    return stripped;
   }
 
   private async fetchGeminiModels(): Promise<ModelDefinition[]> {
