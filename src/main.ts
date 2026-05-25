@@ -2,10 +2,17 @@ import {
   App,
   Editor,
   Notice,
+  normalizePath,
   Plugin,
   PluginSettingTab,
   Setting,
 } from "obsidian";
+import {
+  appendDiagnosticLogEntry,
+  DIAGNOSTIC_LOG_HEADER,
+  DiagnosticLogEntry,
+  sanitizeDiagnosticText,
+} from "./diagnostics";
 import {
   ChatModal,
   ImageModal,
@@ -52,6 +59,9 @@ interface AiAssistantSettings {
   customPrompt2: string;
   customPrompt3: string;
   debugLogging: boolean;
+  showRequestNotices: boolean;
+  diagnosticLogPath: string;
+  maxDiagnosticLogEntries: number;
   enabledModelKeys: Record<string, boolean>;
   fetchedModels: ModelDefinition[];
 }
@@ -82,6 +92,9 @@ const DEFAULT_SETTINGS: AiAssistantSettings = {
   customPrompt2: "",
   customPrompt3: "",
   debugLogging: false,
+  showRequestNotices: true,
+  diagnosticLogPath: "AiAssistant/Logs/diagnostics.md",
+  maxDiagnosticLogEntries: 250,
   enabledModelKeys: CURATED_MODELS.reduce<Record<string, boolean>>(
     (enabledModelKeys, model) => {
       enabledModelKeys[model.key] = true;
@@ -96,6 +109,7 @@ export default class AiAssistantPlugin extends Plugin {
   settings: AiAssistantSettings;
   providerClient: ProviderClient;
   private readonly critiqueTimerIds = new Set<ReturnType<typeof setTimeout>>();
+  private diagnosticWriteQueue = Promise.resolve();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -186,6 +200,14 @@ export default class AiAssistantPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "open-diagnostic-log",
+      name: "Open Assistant Diagnostic Log",
+      callback: () => {
+        void this.openDiagnosticLog();
+      },
+    });
+
     this.addSettingTab(new AiAssistantSettingTab(this.app, this));
   }
 
@@ -200,7 +222,11 @@ export default class AiAssistantPlugin extends Plugin {
     this.providerClient = new ProviderClient(
       this.app,
       this.providerKeys(),
-      this.settings.debugLogging,
+      {
+        debugLogging: this.settings.debugLogging,
+        showRequestNotices: this.settings.showRequestNotices,
+        onDiagnostic: (entry) => this.recordDiagnostic(entry),
+      },
     );
   }
 
@@ -480,6 +506,63 @@ Cover accuracy issues, missing elements, clarity problems, and specific improvem
     };
   }
 
+  private recordDiagnostic(entry: DiagnosticLogEntry): void {
+    this.diagnosticWriteQueue = this.diagnosticWriteQueue
+      .then(() => this.appendDiagnostic(entry))
+      .catch((error) => {
+        console.log("[AI Assistant] diagnostic log error", errorMessage(error));
+      });
+  }
+
+  private async appendDiagnostic(entry: DiagnosticLogEntry): Promise<void> {
+    const path = this.diagnosticLogPath();
+    await this.ensureParentFolders(path);
+    const adapter = this.app.vault.adapter;
+    const existingLog = (await adapter.exists(path))
+      ? await adapter.read(path)
+      : DIAGNOSTIC_LOG_HEADER;
+    const nextLog = appendDiagnosticLogEntry(
+      existingLog,
+      entry,
+      this.settings.maxDiagnosticLogEntries,
+    );
+    await adapter.write(path, nextLog);
+  }
+
+  async openDiagnosticLog(): Promise<void> {
+    const path = this.diagnosticLogPath();
+    await this.ensureParentFolders(path);
+    if (!(await this.app.vault.adapter.exists(path))) {
+      await this.app.vault.adapter.write(path, DIAGNOSTIC_LOG_HEADER);
+    }
+    await this.app.workspace.openLinkText(path, "", true);
+  }
+
+  async clearDiagnosticLog(): Promise<void> {
+    const path = this.diagnosticLogPath();
+    await this.ensureParentFolders(path);
+    await this.app.vault.adapter.write(path, DIAGNOSTIC_LOG_HEADER);
+    new Notice("AI assistant diagnostic log cleared.");
+  }
+
+  private async ensureParentFolders(filePath: string): Promise<void> {
+    const folderParts = filePath.split("/").slice(0, -1);
+    let currentPath = "";
+    for (const part of folderParts) {
+      currentPath = currentPath ? `${currentPath}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(currentPath))) {
+        await this.app.vault.adapter.mkdir(currentPath);
+      }
+    }
+  }
+
+  private diagnosticLogPath(): string {
+    const path = normalizePath(
+      this.settings.diagnosticLogPath || DEFAULT_SETTINGS.diagnosticLogPath,
+    );
+    return path.endsWith(".md") ? path : `${path}.md`;
+  }
+
   private removeObsoleteSettings(): void {
     const record = this.settings as unknown as Record<string, unknown>;
     delete record.mySetting;
@@ -510,7 +593,9 @@ class AiAssistantSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Debug logging")
-      .setDesc("Log provider, model, status, timing, and token usage metadata.")
+      .setDesc(
+        "Mirror safe provider metadata to the DevTools console. The diagnostic file is written separately.",
+      )
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.debugLogging)
@@ -519,6 +604,46 @@ class AiAssistantSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
             this.plugin.buildClient();
           }),
+      );
+
+    new Setting(containerEl)
+      .setName("Request status notices")
+      .setDesc("Show notices when an AI request is sent and when a response succeeds.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.showRequestNotices)
+          .onChange(async (value) => {
+            this.plugin.settings.showRequestNotices = value;
+            await this.plugin.saveSettings();
+            this.plugin.buildClient();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Diagnostic log file")
+      .setDesc(
+        "Safe request metadata only: provider, model, mode, status, latency, usage, and sanitized errors.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("AiAssistant/Logs/diagnostics.md")
+          .setValue(this.plugin.settings.diagnosticLogPath)
+          .onChange(async (value) => {
+            this.plugin.settings.diagnosticLogPath = normalizePath(
+              value || DEFAULT_SETTINGS.diagnosticLogPath,
+            );
+            await this.plugin.saveSettings();
+          }),
+      )
+      .addButton((button) =>
+        button.setButtonText("Open").onClick(() => {
+          void this.plugin.openDiagnosticLog();
+        }),
+      )
+      .addButton((button) =>
+        button.setButtonText("Clear").onClick(() => {
+          void this.plugin.clearDiagnosticLog();
+        }),
       );
 
     containerEl.createEl("h3", { text: "Defaults" });
@@ -858,16 +983,4 @@ function errorMessage(error: unknown): string {
     return sanitizeDiagnosticText(error.message);
   }
   return sanitizeDiagnosticText(String(error));
-}
-
-function sanitizeDiagnosticText(text: string): string {
-  return text
-    .replace(/(key=)[^&\s]+/gi, "$1[redacted]")
-    .replace(/Bearer\s+[^"'\s`]+/gi, "Bearer [redacted]")
-    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted]")
-    .replace(/gsk_[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .replace(/sk-or-v1-[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .replace(/csk-[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .replace(/sk-[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .slice(0, 300);
 }

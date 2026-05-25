@@ -2,10 +2,16 @@ import { App, Notice, requestUrl } from "obsidian";
 import { GoogleGenAI } from "@google/genai";
 import type { Content, ContentListUnion, Part } from "@google/genai";
 import {
+  createDiagnosticLogEntry,
+  DiagnosticLogEntry,
+  sanitizeDiagnosticText,
+} from "./diagnostics";
+import {
   buildModelKey,
   ModelDefinition,
   ModelStatus,
   ProviderId,
+  PROVIDER_LABELS,
 } from "./settings";
 
 export interface ProviderKeys {
@@ -13,6 +19,12 @@ export interface ProviderKeys {
   groq: string;
   openrouter: string;
   cerebras: string;
+}
+
+export interface ProviderClientOptions {
+  debugLogging: boolean;
+  showRequestNotices: boolean;
+  onDiagnostic?: (entry: DiagnosticLogEntry) => void;
 }
 
 export interface TextContentPart {
@@ -122,12 +134,18 @@ export class TextAssistant {
 
 export class ProviderClient {
   private readonly geminiClient?: GoogleGenAI;
+  private readonly debugLogging: boolean;
+  private readonly showRequestNotices: boolean;
+  private readonly onDiagnostic?: (entry: DiagnosticLogEntry) => void;
 
   constructor(
     private readonly app: App,
     private readonly keys: ProviderKeys,
-    private readonly debugLogging: boolean,
+    options: ProviderClientOptions,
   ) {
+    this.debugLogging = options.debugLogging;
+    this.showRequestNotices = options.showRequestNotices;
+    this.onDiagnostic = options.onDiagnostic;
     if (keys.gemini.trim()) {
       this.geminiClient = new GoogleGenAI({ apiKey: keys.gemini.trim() });
     }
@@ -149,7 +167,9 @@ export class ProviderClient {
     useWebSearch = false,
   ): Promise<string | undefined> {
     const startedAt = Date.now();
+    const requestId = createRequestId();
     this.log("request:start", {
+      requestId,
       provider: model.provider,
       model: model.id,
       mode: htmlEl === undefined ? "blocking" : "chat",
@@ -165,6 +185,7 @@ export class ProviderClient {
               promptList,
               maxTokens,
               useWebSearch,
+              requestId,
             );
 
       if (htmlEl !== undefined && answer !== undefined) {
@@ -172,6 +193,7 @@ export class ProviderClient {
       }
 
       this.log("request:success", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -181,6 +203,7 @@ export class ProviderClient {
     } catch (error) {
       this.handleError(`${model.provider} API error`, error);
       this.log("request:error", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -212,37 +235,73 @@ export class ProviderClient {
     model: ModelDefinition,
     prompt: string,
   ): Promise<GeneratedImage[] | undefined> {
-    const client = this.requireGeminiClient();
-    const response = await client.models.generateContent({
+    const startedAt = Date.now();
+    const requestId = createRequestId();
+    this.log("image:start", {
+      requestId,
+      provider: model.provider,
       model: model.id,
-      contents: prompt,
-      config: {
-        responseModalities: ["TEXT", "IMAGE"],
-      },
+      promptLength: prompt.length,
     });
 
-    const parts = response.candidates?.[0]?.content?.parts ?? [];
-    const generatedImages: GeneratedImage[] = [];
-    for (const [index, part] of parts.entries()) {
-      const inlineData = part.inlineData;
-      if (inlineData?.data === undefined) {
-        continue;
-      }
-      const mimeType = inlineData.mimeType ?? "image/png";
-      const extension = mimeType.includes("jpeg") ? "jpg" : "png";
-      generatedImages.push({
-        filename: `gemini-generated-${Date.now()}-${index + 1}.${extension}`,
-        mimeType,
-        dataUrl: `data:${mimeType};base64,${inlineData.data}`,
-        arrayBuffer: base64ToArrayBuffer(inlineData.data),
+    try {
+      const client = this.requireGeminiClient();
+      const response = await client.models.generateContent({
+        model: model.id,
+        contents: prompt,
+        config: {
+          responseModalities: ["TEXT", "IMAGE"],
+        },
       });
-    }
 
-    if (generatedImages.length === 0) {
-      new Notice(response.text ?? "Gemini did not return image data.");
+      const parts = response.candidates?.[0]?.content?.parts ?? [];
+      const generatedImages: GeneratedImage[] = [];
+      for (const [index, part] of parts.entries()) {
+        const inlineData = part.inlineData;
+        if (inlineData?.data === undefined) {
+          continue;
+        }
+        const mimeType = inlineData.mimeType ?? "image/png";
+        const extension = mimeType.includes("jpeg") ? "jpg" : "png";
+        generatedImages.push({
+          filename: `gemini-generated-${Date.now()}-${index + 1}.${extension}`,
+          mimeType,
+          dataUrl: `data:${mimeType};base64,${inlineData.data}`,
+          arrayBuffer: base64ToArrayBuffer(inlineData.data),
+        });
+      }
+
+      if (generatedImages.length === 0) {
+        new Notice(response.text ?? "Gemini did not return image data.");
+        this.log("image:error", {
+          requestId,
+          provider: model.provider,
+          model: model.id,
+          elapsedMs: Date.now() - startedAt,
+          error: "Gemini did not return image data.",
+        });
+        return undefined;
+      }
+
+      this.log("image:success", {
+        requestId,
+        provider: model.provider,
+        model: model.id,
+        elapsedMs: Date.now() - startedAt,
+        imageCount: generatedImages.length,
+      });
+      return generatedImages;
+    } catch (error) {
+      this.handleError(`${model.provider} image error`, error);
+      this.log("image:error", {
+        requestId,
+        provider: model.provider,
+        model: model.id,
+        elapsedMs: Date.now() - startedAt,
+        error: this.errorMessage(error),
+      });
       return undefined;
     }
-    return generatedImages;
   }
 
   private async generateOpenRouterImage(
@@ -250,12 +309,22 @@ export class ProviderClient {
     prompt: string,
   ): Promise<GeneratedImage[] | undefined> {
     const startedAt = Date.now();
+    const requestId = createRequestId();
     const apiKey = this.apiKeyFor("openrouter");
     if (!apiKey) {
-      new Notice("OpenRouter API key is not configured.");
+      const error = "OpenRouter API key is not configured.";
+      new Notice(error);
+      this.log("image:error", {
+        requestId,
+        provider: model.provider,
+        model: model.id,
+        elapsedMs: Date.now() - startedAt,
+        error,
+      });
       return undefined;
     }
     this.log("image:start", {
+      requestId,
       provider: model.provider,
       model: model.id,
       promptLength: prompt.length,
@@ -293,6 +362,7 @@ export class ProviderClient {
       if (generatedImages.length === 0) {
         new Notice("OpenRouter did not return image data.");
         this.log("image:error", {
+          requestId,
           provider: model.provider,
           model: model.id,
           elapsedMs: Date.now() - startedAt,
@@ -302,6 +372,7 @@ export class ProviderClient {
       }
 
       this.log("image:success", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -311,6 +382,7 @@ export class ProviderClient {
     } catch (error) {
       this.handleError("OpenRouter image error", error);
       this.log("image:error", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -325,7 +397,9 @@ export class ProviderClient {
     text: string,
   ): Promise<Blob | undefined> {
     const startedAt = Date.now();
+    const requestId = createRequestId();
     this.log("tts:start", {
+      requestId,
       provider: model.provider,
       model: model.id,
       textLength: text.length,
@@ -333,13 +407,22 @@ export class ProviderClient {
 
     switch (model.provider) {
       case "gemini":
-        return this.generateGeminiSpeech(model, text, startedAt);
+        return this.generateGeminiSpeech(model, text, startedAt, requestId);
       case "openrouter":
-        return this.generateOpenRouterSpeech(model, text, startedAt);
+        return this.generateOpenRouterSpeech(model, text, startedAt, requestId);
       case "groq":
-      case "cerebras":
-        new Notice(`${model.provider} text to speech is not implemented.`);
+      case "cerebras": {
+        const error = `${model.provider} text to speech is not implemented.`;
+        new Notice(error);
+        this.log("tts:error", {
+          requestId,
+          provider: model.provider,
+          model: model.id,
+          elapsedMs: Date.now() - startedAt,
+          error,
+        });
         return undefined;
+      }
     }
   }
 
@@ -347,6 +430,7 @@ export class ProviderClient {
     model: ModelDefinition,
     text: string,
     startedAt: number,
+    requestId: string,
   ): Promise<Blob | undefined> {
     try {
       const client = this.requireGeminiClient();
@@ -370,6 +454,7 @@ export class ProviderClient {
       if (data === undefined) {
         new Notice(response.text ?? "Gemini did not return audio data.");
         this.log("tts:error", {
+          requestId,
           provider: model.provider,
           model: model.id,
           elapsedMs: Date.now() - startedAt,
@@ -379,6 +464,7 @@ export class ProviderClient {
       }
       const pcmBuffer = base64ToArrayBuffer(data);
       this.log("tts:success", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -388,6 +474,7 @@ export class ProviderClient {
     } catch (error) {
       this.handleError(`${model.provider} TTS error`, error);
       this.log("tts:error", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -401,10 +488,19 @@ export class ProviderClient {
     model: ModelDefinition,
     text: string,
     startedAt: number,
+    requestId: string,
   ): Promise<Blob | undefined> {
     const apiKey = this.apiKeyFor("openrouter");
     if (!apiKey) {
-      new Notice("OpenRouter API key is not configured.");
+      const error = "OpenRouter API key is not configured.";
+      new Notice(error);
+      this.log("tts:error", {
+        requestId,
+        provider: model.provider,
+        model: model.id,
+        elapsedMs: Date.now() - startedAt,
+        error,
+      });
       return undefined;
     }
 
@@ -427,6 +523,7 @@ export class ProviderClient {
       }
 
       this.log("tts:success", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -438,6 +535,7 @@ export class ProviderClient {
     } catch (error) {
       this.handleError("OpenRouter TTS error", error);
       this.log("tts:error", {
+        requestId,
         provider: model.provider,
         model: model.id,
         elapsedMs: Date.now() - startedAt,
@@ -487,6 +585,7 @@ export class ProviderClient {
     promptList: ChatMessage[],
     maxTokens: number,
     useWebSearch: boolean,
+    requestId: string,
   ): Promise<string | undefined> {
     const endpoint = providerEndpoint(model.provider, "chat");
     const apiKey = this.apiKeyFor(model.provider);
@@ -532,6 +631,7 @@ export class ProviderClient {
     const json = response.json as ProviderResponse;
     const content = json.choices?.[0]?.message?.content ?? undefined;
     this.log("request:usage", {
+      requestId,
       provider: model.provider,
       model: model.id,
       status: response.status,
@@ -541,6 +641,7 @@ export class ProviderClient {
     const stripped = stripReasoningTags(content);
     if (content && !stripped) {
       this.log("request:warning", {
+        requestId,
         provider: model.provider,
         model: model.id,
         message: "Response was entirely reasoning tags — stripped to empty",
@@ -717,10 +818,59 @@ export class ProviderClient {
   }
 
   private log(event: string, details: Record<string, unknown>): void {
-    if (this.debugLogging || event === "request:error") {
-      console.log(`[AI Assistant] ${event}`, details);
+    const entry = createDiagnosticLogEntry(event, details);
+    this.onDiagnostic?.(entry);
+    this.notifyRequestLifecycle(entry);
+    if (
+      this.debugLogging ||
+      event.endsWith(":error") ||
+      event.endsWith(":warning")
+    ) {
+      console.log(`[AI Assistant] ${event}`, entry);
     }
   }
+
+  private notifyRequestLifecycle(entry: DiagnosticLogEntry): void {
+    if (!this.showRequestNotices) {
+      return;
+    }
+    if (entry.event.endsWith(":start")) {
+      new Notice(`AI ${requestKind(entry.event)} request sent to ${providerModelLabel(entry)}.`);
+    }
+    if (entry.event.endsWith(":success")) {
+      new Notice(
+        `AI ${requestKind(entry.event)} response OK from ${providerModelLabel(entry)}${elapsedLabel(entry)}.`,
+      );
+    }
+  }
+}
+
+function createRequestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function requestKind(event: string): string {
+  if (event.startsWith("image:")) {
+    return "image";
+  }
+  if (event.startsWith("tts:")) {
+    return "TTS";
+  }
+  return "text";
+}
+
+function providerModelLabel(entry: DiagnosticLogEntry): string {
+  const provider =
+    entry.provider !== undefined && entry.provider in PROVIDER_LABELS
+      ? PROVIDER_LABELS[entry.provider as ProviderId]
+      : entry.provider ?? "provider";
+  return entry.model === undefined ? provider : `${provider} / ${entry.model}`;
+}
+
+function elapsedLabel(entry: DiagnosticLogEntry): string {
+  return typeof entry.elapsedMs === "number"
+    ? ` in ${(entry.elapsedMs / 1000).toFixed(1)}s`
+    : "";
 }
 
 function providerEndpoint(provider: ProviderId, route: "chat" | "speech"): string {
@@ -945,16 +1095,4 @@ function writeAscii(view: DataView, offset: number, value: string): void {
   for (let index = 0; index < value.length; index++) {
     view.setUint8(offset + index, value.charCodeAt(index));
   }
-}
-
-function sanitizeDiagnosticText(text: string): string {
-  return text
-    .replace(/(key=)[^&\s]+/gi, "$1[redacted]")
-    .replace(/Bearer\s+[^"'\s`]+/gi, "Bearer [redacted]")
-    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted]")
-    .replace(/gsk_[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .replace(/sk-or-v1-[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .replace(/csk-[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .replace(/sk-[A-Za-z0-9_-]{20,}/g, "[redacted]")
-    .slice(0, 300);
 }

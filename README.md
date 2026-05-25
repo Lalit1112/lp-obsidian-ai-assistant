@@ -13,6 +13,7 @@ OpenRouter, and Cerebras models directly from your notes.
 - Image generation with Gemini and OpenRouter image-capable models.
 - Text-to-speech with Gemini and OpenRouter TTS-capable models.
 - Optional critique mode with a separate critique model.
+- Safe diagnostics log and request status notices for troubleshooting.
 
 ## Quick Start
 
@@ -133,10 +134,19 @@ through OpenRouter. Direct OpenAI and Anthropic API keys are not used.
 
 ### Debug Logging
 
-Debug logging records provider, model, request mode, response status, timing, and
-token usage metadata where available. It does not log API keys, full prompts,
-selected note text, or raw response bodies. Logs appear in the Obsidian
-developer console.
+The plugin writes a safe diagnostic log to
+`AiAssistant/Logs/diagnostics.md` by default. It records provider, model,
+request mode, response status, timing, token usage where available, and
+sanitized errors. It does not log API keys, full prompts, selected note text, or
+raw response bodies.
+
+Settings also include:
+
+- Request status notices: shows when a request is sent and when the response is
+  OK. Provider errors still show as normal Obsidian notices.
+- Debug logging: mirrors the same safe metadata to the Obsidian developer
+  console.
+- Diagnostic log file: change, open, or clear the log file.
 
 ## Installation
 
