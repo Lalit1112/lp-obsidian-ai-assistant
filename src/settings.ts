@@ -1,4 +1,9 @@
-export type ProviderId = "gemini" | "groq" | "openrouter" | "cerebras";
+export type ProviderId =
+  | "gemini"
+  | "groq"
+  | "openrouter"
+  | "cerebras"
+  | "lmstudio";
 
 export type ModelCapability =
   | "text"
@@ -37,8 +42,10 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
   groq: "Groq",
   openrouter: "OpenRouter",
   cerebras: "Cerebras",
+  lmstudio: "LM Studio",
 };
 
+export const DEFAULT_LMSTUDIO_BASE_URL = "http://localhost:1234/v1";
 export const DEFAULT_TEXT_MODEL_KEY = "cerebras:zai-glm-4.7";
 export const DEFAULT_CRITIQUE_MODEL_KEY = "groq:groq/compound";
 export const DEFAULT_FACT_CHECK_MODEL_KEY = "groq:groq/compound";
@@ -65,11 +72,28 @@ export function splitModelKey(
     provider === "gemini" ||
     provider === "groq" ||
     provider === "openrouter" ||
-    provider === "cerebras"
+    provider === "cerebras" ||
+    provider === "lmstudio"
   ) {
     return { provider, id };
   }
   return undefined;
+}
+
+export function normalizeLmStudioBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return DEFAULT_LMSTUDIO_BASE_URL;
+  }
+
+  let normalized = trimmed.replace(/\/+$/, "");
+  normalized = normalized
+    .replace(/\/chat\/completions$/i, "")
+    .replace(/\/models$/i, "");
+  if (!/\/v1$/i.test(normalized)) {
+    normalized = `${normalized}/v1`;
+  }
+  return normalized;
 }
 
 function model(

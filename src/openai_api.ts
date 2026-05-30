@@ -8,8 +8,10 @@ import {
 } from "./diagnostics";
 import {
   buildModelKey,
+  DEFAULT_LMSTUDIO_BASE_URL,
   ModelDefinition,
   ModelStatus,
+  normalizeLmStudioBaseUrl,
   ProviderId,
   PROVIDER_LABELS,
 } from "./settings";
@@ -24,6 +26,7 @@ export interface ProviderKeys {
 export interface ProviderClientOptions {
   debugLogging: boolean;
   showRequestNotices: boolean;
+  lmStudioBaseUrl: string;
   onDiagnostic?: (entry: DiagnosticLogEntry) => void;
 }
 
@@ -136,6 +139,7 @@ export class ProviderClient {
   private readonly geminiClient?: GoogleGenAI;
   private readonly debugLogging: boolean;
   private readonly showRequestNotices: boolean;
+  private readonly lmStudioBaseUrl: string;
   private readonly onDiagnostic?: (entry: DiagnosticLogEntry) => void;
 
   constructor(
@@ -145,6 +149,7 @@ export class ProviderClient {
   ) {
     this.debugLogging = options.debugLogging;
     this.showRequestNotices = options.showRequestNotices;
+    this.lmStudioBaseUrl = normalizeLmStudioBaseUrl(options.lmStudioBaseUrl);
     this.onDiagnostic = options.onDiagnostic;
     if (keys.gemini.trim()) {
       this.geminiClient = new GoogleGenAI({ apiKey: keys.gemini.trim() });
@@ -224,6 +229,7 @@ export class ProviderClient {
         return this.generateOpenRouterImage(model, prompt);
       case "groq":
       case "cerebras":
+      case "lmstudio":
         new Notice(
           `${model.provider} image generation is not implemented for this model.`,
         );
@@ -411,7 +417,8 @@ export class ProviderClient {
       case "openrouter":
         return this.generateOpenRouterSpeech(model, text, startedAt, requestId);
       case "groq":
-      case "cerebras": {
+      case "cerebras":
+      case "lmstudio": {
         const error = `${model.provider} text to speech is not implemented.`;
         new Notice(error);
         this.log("tts:error", {
@@ -561,6 +568,11 @@ export class ProviderClient {
           "cerebras",
           "https://api.cerebras.ai/v1/models",
         );
+      case "lmstudio":
+        return this.fetchOpenAICompatibleModels(
+          "lmstudio",
+          `${this.lmStudioBaseUrl}/models`,
+        );
     }
   }
 
@@ -587,7 +599,7 @@ export class ProviderClient {
     useWebSearch: boolean,
     requestId: string,
   ): Promise<string | undefined> {
-    const endpoint = providerEndpoint(model.provider, "chat");
+    const endpoint = this.providerEndpoint(model.provider, "chat");
     const apiKey = this.apiKeyFor(model.provider);
     const body: Record<string, unknown> = {
       model: model.id,
@@ -733,7 +745,7 @@ export class ProviderClient {
     url: string,
   ): Promise<ModelDefinition[]> {
     const apiKey = this.apiKeyFor(provider);
-    if (!apiKey) {
+    if (provider !== "lmstudio" && !apiKey) {
       new Notice(`${provider} API key is not configured.`);
       return [];
     }
@@ -777,20 +789,37 @@ export class ProviderClient {
   }
 
   private apiKeyFor(provider: ProviderId): string {
-    return this.keys[provider].trim();
+    switch (provider) {
+      case "gemini":
+        return this.keys.gemini.trim();
+      case "groq":
+        return this.keys.groq.trim();
+      case "openrouter":
+        return this.keys.openrouter.trim();
+      case "cerebras":
+        return this.keys.cerebras.trim();
+      case "lmstudio":
+        return "";
+    }
   }
 
   private authHeaders(provider: ProviderId, apiKey: string): Record<string, string> {
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     };
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
     if (provider === "openrouter") {
       headers["HTTP-Referer"] =
         "https://github.com/Lalit1112/lp-obsidian-ai-assistant";
       headers["X-Title"] = "LP Obsidian AI Assistant";
     }
     return headers;
+  }
+
+  private providerEndpoint(provider: ProviderId, route: "chat" | "speech"): string {
+    return providerEndpoint(provider, route, this.lmStudioBaseUrl);
   }
 
   private providerErrorMessage(status: number, text: string): string {
@@ -873,7 +902,11 @@ function elapsedLabel(entry: DiagnosticLogEntry): string {
     : "";
 }
 
-function providerEndpoint(provider: ProviderId, route: "chat" | "speech"): string {
+function providerEndpoint(
+  provider: ProviderId,
+  route: "chat" | "speech",
+  lmStudioBaseUrl = DEFAULT_LMSTUDIO_BASE_URL,
+): string {
   if (route === "speech") {
     if (provider === "openrouter") {
       return "https://openrouter.ai/api/v1/audio/speech";
@@ -887,6 +920,8 @@ function providerEndpoint(provider: ProviderId, route: "chat" | "speech"): strin
       return "https://openrouter.ai/api/v1/chat/completions";
     case "cerebras":
       return "https://api.cerebras.ai/v1/chat/completions";
+    case "lmstudio":
+      return `${normalizeLmStudioBaseUrl(lmStudioBaseUrl)}/chat/completions`;
     case "gemini":
       throw new Error("Gemini does not use an OpenAI-compatible endpoint.");
   }
@@ -961,7 +996,8 @@ function inferCapabilities(
     metadata.outputModalities.length === 0 ||
     metadata.outputModalities.includes("text") ||
     provider === "groq" ||
-    provider === "cerebras"
+    provider === "cerebras" ||
+    provider === "lmstudio"
   ) {
     capabilities.add("text");
   }

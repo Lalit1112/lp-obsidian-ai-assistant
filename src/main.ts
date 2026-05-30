@@ -28,6 +28,7 @@ import {
   DEFAULT_CRITIQUE_MODEL_KEY,
   DEFAULT_FACT_CHECK_MODEL_KEY,
   DEFAULT_IMAGE_MODEL_KEY,
+  DEFAULT_LMSTUDIO_BASE_URL,
   DEFAULT_MAX_TOKENS,
   DEFAULT_RESEARCH_MODEL_KEY,
   DEFAULT_TEXT_MODEL_KEY,
@@ -36,6 +37,7 @@ import {
   ModelCapability,
   ModelDefinition,
   modelSupports,
+  normalizeLmStudioBaseUrl,
   ProviderId,
   PROVIDER_LABELS,
   QUICK_PROMPTS,
@@ -46,6 +48,7 @@ interface AiAssistantSettings {
   groqApiKey: string;
   openRouterApiKey: string;
   cerebrasApiKey: string;
+  lmStudioBaseUrl: string;
   defaultTextModelKey: string;
   defaultCritiqueModelKey: string;
   defaultFactCheckModelKey: string;
@@ -79,6 +82,7 @@ const DEFAULT_SETTINGS: AiAssistantSettings = {
   groqApiKey: "",
   openRouterApiKey: "",
   cerebrasApiKey: "",
+  lmStudioBaseUrl: DEFAULT_LMSTUDIO_BASE_URL,
   defaultTextModelKey: DEFAULT_TEXT_MODEL_KEY,
   defaultCritiqueModelKey: DEFAULT_CRITIQUE_MODEL_KEY,
   defaultFactCheckModelKey: DEFAULT_FACT_CHECK_MODEL_KEY,
@@ -225,6 +229,7 @@ export default class AiAssistantPlugin extends Plugin {
       {
         debugLogging: this.settings.debugLogging,
         showRequestNotices: this.settings.showRequestNotices,
+        lmStudioBaseUrl: this.settings.lmStudioBaseUrl,
         onDiagnostic: (entry) => this.recordDiagnostic(entry),
       },
     );
@@ -366,6 +371,11 @@ export default class AiAssistantPlugin extends Plugin {
       loaded.defaultResearchModelKey ?? DEFAULT_RESEARCH_MODEL_KEY;
     this.settings.defaultTtsModelKey =
       loaded.defaultTtsModelKey ?? DEFAULT_TTS_MODEL_KEY;
+    this.settings.lmStudioBaseUrl = normalizeLmStudioBaseUrl(
+      typeof loaded.lmStudioBaseUrl === "string"
+        ? loaded.lmStudioBaseUrl
+        : DEFAULT_LMSTUDIO_BASE_URL,
+    );
 
     this.removeObsoleteSettings();
   }
@@ -590,6 +600,20 @@ class AiAssistantSettingTab extends PluginSettingTab {
     this.addApiKeySetting("Groq API Key", "groqApiKey");
     this.addApiKeySetting("OpenRouter API Key", "openRouterApiKey");
     this.addApiKeySetting("Cerebras API Key", "cerebrasApiKey");
+
+    new Setting(containerEl)
+      .setName("LM Studio base URL")
+      .setDesc("OpenAI-compatible base URL for the LM Studio server.")
+      .addText((text) =>
+        text
+          .setPlaceholder(DEFAULT_LMSTUDIO_BASE_URL)
+          .setValue(this.plugin.settings.lmStudioBaseUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.lmStudioBaseUrl = normalizeLmStudioBaseUrl(value);
+            await this.plugin.saveSettings();
+            this.plugin.buildClient();
+          }),
+      );
 
     new Setting(containerEl)
       .setName("Debug logging")

@@ -1,12 +1,13 @@
 # LP Obsidian AI Assistant
 
 LP Obsidian AI Assistant is an Obsidian plugin for working with Gemini, Groq,
-OpenRouter, and Cerebras models directly from your notes.
+OpenRouter, Cerebras, and LM Studio-hosted models directly from your notes.
 
 ## Features
 
 - Text chat and selected-text prompt workflows.
-- Explicit provider/model routing for Gemini, Groq, OpenRouter, and Cerebras.
+- Explicit provider/model routing for Gemini, Groq, OpenRouter, Cerebras, and
+  LM Studio.
 - Curated model catalog with optional provider model refresh from settings.
 - Quick prompts for grammar/readability, markdown structure, web fact checking,
   web research, research-backed logic, and writing coaching.
@@ -93,6 +94,10 @@ Configure API keys for:
 - OpenRouter
 - Cerebras
 
+LM Studio does not require an API key. Start the LM Studio server, confirm its
+OpenAI-compatible base URL, then set `LM Studio base URL` if it differs from
+`http://localhost:1234/v1`.
+
 Direct OpenAI and Anthropic API keys are not used. OpenAI- or Anthropic-family
 models can still be used when routed through OpenRouter model IDs.
 
@@ -132,6 +137,9 @@ the dropdowns unless you opt in.
 OpenRouter-routed OpenAI, Anthropic, xAI, and other model IDs are supported
 through OpenRouter. Direct OpenAI and Anthropic API keys are not used.
 
+For LM Studio, start the server first, then use `Fetch LM Studio models` so the
+plugin can add the currently available local or network-hosted models.
+
 ### Debug Logging
 
 The plugin writes a safe diagnostic log to
@@ -163,6 +171,7 @@ Settings also include:
 - Groq API key: <https://console.groq.com/keys>
 - OpenRouter API key: <https://openrouter.ai/settings/keys>
 - Cerebras API key: <https://cloud.cerebras.ai/>
+- LM Studio server: <https://lmstudio.ai/docs/developer/core/server>
 
 ## Notes
 
